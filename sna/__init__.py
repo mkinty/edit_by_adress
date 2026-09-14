@@ -1,9 +1,9 @@
 """Projet SNA — Modification des fichiers audit Excel par adresse.
 
-L'utilisateur saisit des paires (adresse, nouvel ID erreur) ; le programme
-résout le code INSEE de chaque adresse (API Adresse, data.gouv.fr), en déduit
-les communes concernées, ouvre le fichier audit de chacune, et écrit dans la
-colonne « ID erreur » des lignes dont l'adresse correspond la valeur associée.
+L'utilisateur saisit des triplets (code INSEE, adresse, nouvel ID erreur) ;
+le programme en déduit les communes concernées, ouvre le fichier audit de
+chacune, et écrit dans la colonne « ID erreur » des lignes dont l'adresse
+correspond la valeur associée.
 
 Le package est volontairement découpé en couches indépendantes :
 

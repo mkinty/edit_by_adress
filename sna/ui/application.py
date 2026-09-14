@@ -2,9 +2,8 @@
 
 Rôle strictement limité à l'affichage et à l'interaction :
     - paramétrage du dossier racine et des colonnes utilisées ;
-    - collecte des paires (adresse, ID erreur) saisies par l'utilisateur ;
-    - résolution des codes INSEE des adresses (API Adresse, data.gouv.fr) et
-      regroupement par commune ;
+    - collecte des triplets (code INSEE, adresse, ID erreur) saisis par
+      l'utilisateur, et regroupement par commune ;
     - déclenchement du traitement dans un thread de fond ;
     - restitution de la progression et du journal.
 
@@ -32,7 +31,6 @@ from ..services.adresses import (
     SaisieAdresse, extraire_saisies, grouper_par_commune, lignes_incompletes,
 )
 from ..services.fichiers import trouver_fichier_exemple
-from ..services.geocodage import ErreurGeocodage, codes_insee_pour_adresses
 from ..services.traitement import traiter_communes
 from .panneau_config import PanneauConfig
 from .theme import STYLE_STATUT, Couleurs, Polices
@@ -132,8 +130,8 @@ class Application(tk.Tk):
     def _construire_saisie(self, parent) -> None:
         tk.Label(
             parent,
-            text="Collez vos adresses, une par ligne "
-                 "(adresse [Tab ou ; ou ->] nouvel ID erreur) :",
+            text="Collez vos corrections, une par ligne "
+                 "(code INSEE [Tab ou ; ou ->] adresse [Tab ou ; ou ->] nouvel ID erreur) :",
             bg=Couleurs.FOND, fg=Couleurs.TEXTE_SECONDAIRE, font=Polices.LABEL,
         ).pack(anchor="w", pady=(0, 4))
         self.txt_adresses = tk.Text(
@@ -191,12 +189,7 @@ class Application(tk.Tk):
         return self.txt_adresses.get("1.0", tk.END)
 
     def _maj_apercu(self) -> None:
-        """Compte, à la volée, ce que le programme a compris de la saisie.
-
-        Les communes ne sont connues qu'après résolution des codes INSEE
-        (appel réseau), qui n'a lieu qu'au lancement du traitement : cet
-        aperçu se limite donc aux paires reconnues dans le texte.
-        """
+        """Compte, à la volée, ce que le programme a compris de la saisie."""
         texte = self._saisie()
         saisies = extraire_saisies(texte)
         incompletes = lignes_incompletes(texte)
@@ -205,12 +198,13 @@ class Application(tk.Tk):
             self.lbl_apercu.config(text="", fg=Couleurs.TEXTE_SECONDAIRE)
             return
 
-        message = f"{len(saisies)} adresse(s) reconnue(s)"
+        groupes = grouper_par_commune(saisies)
+        message = f"{len(saisies)} adresse(s) → {len(groupes)} commune(s)"
         couleur = Couleurs.VERT if saisies else Couleurs.AVERTISSEMENT
         if incompletes:
             message += (
                 f"  ·  {len(incompletes)} ligne(s) incomplète(s) ignorée(s) "
-                "(adresse ou ID erreur manquant)"
+                "(code INSEE, adresse ou ID erreur manquant/invalide)"
             )
             couleur = Couleurs.AVERTISSEMENT
         self.lbl_apercu.config(text=message, fg=couleur)
@@ -279,9 +273,10 @@ class Application(tk.Tk):
         if not saisies:
             messagebox.showwarning(
                 "Erreur",
-                "Aucune adresse valide détectée.\n\n"
-                "Format attendu, une ligne par adresse : adresse, une tabulation, "
-                "un point-virgule ou « -> », puis le nouvel ID erreur.",
+                "Aucune correction valide détectée.\n\n"
+                "Format attendu, une ligne par correction : code INSEE, une "
+                "tabulation, un point-virgule ou « -> », l'adresse, le même "
+                "séparateur, puis le nouvel ID erreur.",
             )
             return
 
@@ -293,11 +288,13 @@ class Application(tk.Tk):
         incompletes = lignes_incompletes(texte)
         if incompletes and not messagebox.askyesno(
             "Lignes incomplètes",
-            f"{len(incompletes)} ligne(s) n'ont pas pu être comprises (adresse ou "
-            f"ID erreur manquant) et seront ignorées.\n\nContinuer ?",
+            f"{len(incompletes)} ligne(s) n'ont pas pu être comprises (code INSEE "
+            f"invalide, adresse ou ID erreur manquant) et seront ignorées.\n\n"
+            "Continuer ?",
         ):
             return
 
+        groupes = grouper_par_commune(saisies)
         simulation = self.var_simulation.get()
         avertissement = (
             "🔍 Mode simulation : aucun fichier ne sera modifié."
@@ -306,58 +303,36 @@ class Application(tk.Tk):
         )
         if not messagebox.askyesno(
             "Confirmation",
-            f"Rechercher la commune de {len(saisies)} adresse(s) via l'API Adresse, "
-            f"puis écrire leur valeur dans la colonne « {self.config_adresses.colonne_id} » "
-            f"(lignes sélectionnées via « {self.config_adresses.colonne_adresse} ») ?"
-            f"\n\n{avertissement}",
+            f"Appliquer {len(saisies)} correction(s) sur {len(groupes)} commune(s) ?\n\n"
+            f"Lignes sélectionnées via « {self.config_adresses.colonne_adresse} », "
+            f"valeur écrite dans « {self.config_adresses.colonne_id} ».\n\n"
+            f"{avertissement}",
         ):
             return
 
         self._reinitialiser_journal()
         self.btn.config(state="disabled")
         threading.Thread(
-            target=self._executer, args=(saisies, racine, simulation), daemon=True
+            target=self._executer, args=(groupes, racine, simulation), daemon=True
         ).start()
 
-    def _executer(self, saisies: list[SaisieAdresse], racine: str, simulation: bool) -> None:
-        """Exécuté dans un thread de fond : résout les adresses puis traite les communes.
+    def _executer(
+        self, groupes: dict[str, list[SaisieAdresse]], racine: str, simulation: bool
+    ) -> None:
+        """Exécuté dans un thread de fond : traite les communes du regroupement.
 
-        Chaque étape est journalisée au fil de l'eau — résolution des codes
-        INSEE, recherche du fichier, analyse, chargement, écriture,
-        enregistrement — afin que l'utilisateur voie l'avancement au lieu
-        d'attendre devant un journal figé.
+        Chaque étape est journalisée au fil de l'eau — recherche du fichier,
+        analyse, chargement, écriture, enregistrement — afin que l'utilisateur
+        voie l'avancement au lieu d'attendre devant un journal figé.
         """
         mode = " (simulation)" if simulation else ""
+        nb_saisies = sum(len(v) for v in groupes.values())
         depart = time.perf_counter()
 
-        self._journaliser(f"🚀 {len(saisies)} adresse(s){mode}", Couleurs.INFO)
-        self._journaliser(f"📂 Racine : {racine}", Couleurs.TEXTE_SECONDAIRE)
         self._journaliser(
-            "🌐 Résolution des codes INSEE via l'API Adresse (data.gouv.fr)…",
-            Couleurs.TEXTE_SECONDAIRE,
+            f"🚀 {nb_saisies} adresse(s) sur {len(groupes)} commune(s){mode}", Couleurs.INFO
         )
-
-        try:
-            codes = codes_insee_pour_adresses({s.adresse for s in saisies})
-        except ErreurGeocodage as exc:
-            self._journaliser(f"❌ Résolution des adresses impossible : {exc}", Couleurs.ERREUR)
-            self.after(0, self._terminer, 0, 0, 0, 0, simulation)
-            return
-
-        groupes, non_resolues = grouper_par_commune(saisies, codes)
-        if non_resolues:
-            self._journaliser(
-                f"⚠️ {len(non_resolues)} adresse(s) sans commune identifiée : "
-                + ", ".join(s.adresse for s in non_resolues[:5])
-                + ("…" if len(non_resolues) > 5 else ""),
-                Couleurs.AVERTISSEMENT,
-            )
-
-        if not groupes:
-            self._journaliser("❌ Aucune commune identifiée — rien à traiter", Couleurs.ERREUR)
-            self.after(0, self._terminer, 0, 0, 0, len(non_resolues), simulation)
-            return
-
+        self._journaliser(f"📂 Racine : {racine}", Couleurs.TEXTE_SECONDAIRE)
         self._journaliser(
             f"🔎 Filtre : colonne « {self.config_adresses.colonne_adresse} » "
             f"→ écriture dans « {self.config_adresses.colonne_id} »"
@@ -376,7 +351,7 @@ class Application(tk.Tk):
         duree = time.perf_counter() - depart
         n_ok = sum(1 for r in resultats if r.statut is Statut.SUCCES)
         total_modifs = sum(r.nb_modifications for r in resultats)
-        total_absentes = sum(len(r.adresses_absentes) for r in resultats) + len(non_resolues)
+        total_absentes = sum(len(r.adresses_absentes) for r in resultats)
         self._journaliser(SEPARATEUR, Couleurs.SEPARATEUR)
         self._journaliser(
             f"🎉 {n_ok}/{len(groupes)} fichier(s) traité(s) — "

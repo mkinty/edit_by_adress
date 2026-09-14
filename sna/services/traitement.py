@@ -1,14 +1,13 @@
 """Orchestration : traitement d'un lot de communes.
 
-L'entrée est le dictionnaire ``{insee: [SaisieAdresse, …]}`` obtenu après
-résolution des codes INSEE des adresses saisies (cf. ``services.geocodage`` et
-``services.adresses.grouper_par_commune``) : une entrée = un fichier audit à
-ouvrir.
+L'entrée est le dictionnaire ``{insee: [SaisieAdresse, …]}`` construit par
+``services.adresses.grouper_par_commune`` à partir de la saisie de
+l'utilisateur (code INSEE, adresse, valeur d'ID erreur) : une entrée = un
+fichier audit à ouvrir.
 
 Le cœur métier est totalement découplé de l'interface : il communique via trois
 callbacks optionnels (progression, étape, résultat) et retourne la liste des
-résultats. Appelé sans callbacks, il reste parfaitement testable — et ne fait
-lui-même aucun appel réseau, la résolution des codes INSEE ayant déjà eu lieu.
+résultats. Appelé sans callbacks, il reste parfaitement testable.
 
 Le callback ``on_etape`` est appelé **pendant** le traitement d'une commune
 (recherche du fichier, analyse, chargement, écriture, enregistrement) : c'est
